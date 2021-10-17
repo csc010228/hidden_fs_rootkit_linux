@@ -10,7 +10,6 @@
 #define __NR_syscall 335	/* 系统调用号335 */
 
 int orig_cr0;	/* 用来存储cr0寄存器原来的值 */
-//unsigned long (*p_kallsyms_lookup_name)(char * name)=0;	/*kallsyms_lookup_name函数的指针*/
 unsigned long *sys_call_table = 0;			/*系统调用表的指针*/
 static int (*anything_saved)(void);	/*定义一个函数指针，用来保存一个系统调用*/
 /*
@@ -74,10 +73,8 @@ static unsigned long * get_syscall_table(void) {
 /*模块的初始化函数，模块的入口函数，加载模块*/
 static int __init init_addsyscall(void)
 {
-	//p_kallsyms_lookup_name=（unsigned long (*)(char *))0x00000000000000;						/*直接写入kallsyms_lookup_name函数的地址*/
 	printk("My syscall is starting。。。\n");
-	//sys_call_table = (unsigned long *)kallsyms_lookup_name("sys_call_table");	/* 获取系统调用服务首地址 */
-	sys_call_table=get_syscall_table();
+	sys_call_table=get_syscall_table();			/* 获取系统调用服务首地址 */
    	printk("sys_call_table: 0x%p\n", sys_call_table);
 	anything_saved = (int(*)(void))(sys_call_table[__NR_syscall]);	/* 保存原始系统调用 */
 	orig_cr0 = clear_and_return_cr0();	/* 设置cr0可更改 */
