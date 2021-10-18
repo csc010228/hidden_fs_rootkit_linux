@@ -82,7 +82,6 @@ static int __init init_hidden_fs(void)
 	printk("My syscall is starting。。。\n");
 	sys_call_table=get_syscall_table();			/* 获取系统调用服务首地址 */
    	printk("sys_call_table: 0x%p\n", sys_call_table);
-	//anything_saved = (int(*)(void))(sys_call_table[__NR_syscall]);	/* 保存原始系统调用 */
 	orig_statfs=(statfs_t)(sys_call_table[__NR_statfs]);		/* 保存原始系统调用 */
 	orig_cr0 = set_cr0_16_0();	/* 设置cr0可更改 */
 	sys_call_table[__NR_statfs]=(unsigned long int)statfs_hook;		/* 更改原始的系统调用服务地址 */
