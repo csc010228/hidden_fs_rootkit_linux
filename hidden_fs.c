@@ -7,15 +7,13 @@
 #include <linux/sched.h>
 #include <linux/kallsyms.h>
 
-#define __NR_syscall 335	/* 系统调用号335 */
+MODULE_LICENSE("GPL");
 
-int orig_cr0;	/* 用来存储cr0寄存器原来的值 */
 unsigned long *sys_call_table = 0;			/*系统调用表的指针*/
-static int (*anything_saved)(void);	/*定义一个函数指针，用来保存一个系统调用*/
 /*
- * 设置cr0寄存器的第17位为0
- */
-unsigned int clear_and_return_cr0(void)	
+设置cr0寄存器的第16位为0，并把原始的cr0寄存器的值返回
+*/
+unsigned int set_cr0_16_0(void)	
 {
    	unsigned int cr0 = 0;
    	unsigned int ret;
@@ -29,7 +27,9 @@ unsigned int clear_and_return_cr0(void)
 	return ret;
 }
 
-/* 读取val的值到rax寄存器，再将rax寄存器的值放入cr0中 */
+/*
+读取val的值到rax寄存器，再将rax寄存器的值放入cr0中
+*/
 void setback_cr0(unsigned int val)
 {	
 
@@ -37,12 +37,17 @@ void setback_cr0(unsigned int val)
 	asm volatile ("movq %%rax, %%cr0" :: "a"(val));
 }
 
-/* 添加自己的系统调用函数 */
-static int sys_mycall(void)
+typedef long (*statfs_t)(const char * path,struct statfs *buf);
+statfs_t orig_statfs;
+
+asmlinkage long statfs_hook(const char * path,struct statfs *buf)
 {
-	int ret = 12345;
-	printk("My syscall is successful!\n");
-	return ret;
+	struct kstatfs st;
+	int error = user_statfs(pathname, &st);
+	if (!error)
+		error = do_statfs_native(&st, buf);
+	printk("statfs\n");
+	return error;
 }
 
 static struct kprobe kp = {
@@ -55,43 +60,45 @@ static struct kprobe kp = {
 （具体机制暂且不清楚）
 */
 static unsigned long * get_syscall_table(void) {
-  /* typedef for kallsyms_lookup_name() so we can easily cast kp.addr */
-  typedef unsigned long (*kallsyms_lookup_name_t)(const char *name);
-  kallsyms_lookup_name_t kallsyms_lookup_name;
+  	/* typedef for kallsyms_lookup_name() so we can easily cast kp.addr */
+ 	typedef unsigned long (*kallsyms_lookup_name_t)(const char *name);
+	kallsyms_lookup_name_t kallsyms_lookup_name;
 
-  /* register the kprobe */
-  register_kprobe(&kp);
+  	/* register the kprobe */
+  	register_kprobe(&kp);
 
-  /* assign kallsyms_lookup_name symbol to kp.addr */
-  kallsyms_lookup_name = (kallsyms_lookup_name_t) kp.addr;
+  	/* assign kallsyms_lookup_name symbol to kp.addr */
+  	kallsyms_lookup_name = (kallsyms_lookup_name_t) kp.addr;
     
-  /* done with the kprobe, so unregister it */
-  unregister_kprobe(&kp);
-  return (unsigned long *) kallsyms_lookup_name("sys_call_table");
+  	/* done with the kprobe, so unregister it */
+  	unregister_kprobe(&kp);
+  	return (unsigned long *) kallsyms_lookup_name("sys_call_table");
 }
 
 /*模块的初始化函数，模块的入口函数，加载模块*/
-static int __init init_addsyscall(void)
+static int __init init_hidden_fs(void)
 {
+	int orig_cr0;		/*原始cr0寄存器的值*/
 	printk("My syscall is starting。。。\n");
 	sys_call_table=get_syscall_table();			/* 获取系统调用服务首地址 */
    	printk("sys_call_table: 0x%p\n", sys_call_table);
-	anything_saved = (int(*)(void))(sys_call_table[__NR_syscall]);	/* 保存原始系统调用 */
-	orig_cr0 = clear_and_return_cr0();	/* 设置cr0可更改 */
-	sys_call_table[__NR_syscall] = (unsigned long)&sys_mycall;	/* 更改原始的系统调用服务地址 */
+	//anything_saved = (int(*)(void))(sys_call_table[__NR_syscall]);	/* 保存原始系统调用 */
+	orig_statfs=(statfs_t)(sys_call_table[__NR_statfs]);		/* 保存原始系统调用 */
+	orig_cr0 = set_cr0_16_0();	/* 设置cr0可更改 */
+	sys_call_table[__NR_statfs]=(unsigned long int)statfs_hook;		/* 更改原始的系统调用服务地址 */
 	setback_cr0(orig_cr0);	/* 设置为原始的只读cr0 */
 	return 0;
 }
 
 /*出口函数，卸载模块*/
-static void __exit exit_addsyscall(void)
+static void __exit exit_hidden_fs(void)
 {
- 	orig_cr0 = clear_and_return_cr0();	/* 设置cr0中对sys_call_table的更改权限 */
-    	sys_call_table[__NR_syscall] = (unsigned long)anything_saved;	/* 设置cr0可更改 */
-    	setback_cr0(orig_cr0);	/* 恢复原有的中断向量表中的函数指针的值 */
+	int orig_cr0;		/*原始cr0寄存器的值*/
+ 	orig_cr0 = set_cr0_16_0();	/* 设置cr0中对sys_call_table的更改权限 */
+	sys_call_table[__NR_statfs]=(unsigned long int)orig_statfs;			/*恢复原始系统调用*/
+    setback_cr0(orig_cr0);	/* 恢复原有的中断向量表中的函数指针的值 */
    	printk("My syscall exit....\n");	/* 恢复原有的cr0的值 */
 }
 
-module_init(init_addsyscall);
-module_exit(exit_addsyscall);
-MODULE_LICENSE("GPL");
+module_init(init_hidden_fs);
+module_exit(exit_hidden_fs);
