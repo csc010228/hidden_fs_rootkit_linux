@@ -4,5 +4,5 @@
 
 将代码下载下来之后依次执行如下命令：  
 `make`  
-`sudo insmod hidden_fs.ko`. 
+`sudo insmod hidden_fs.ko`  
 即可
