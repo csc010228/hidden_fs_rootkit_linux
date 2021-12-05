@@ -7,3 +7,5 @@
 `make`  
 `sudo insmod hidden_fs.ko`  
 即可
+
+detect1和detect2这两个目录下的文件是用于隐藏文件系统检测的,首选使用detect1进行检测,如果detetc1没有奏效,那么再考虑用detect2进行检测
