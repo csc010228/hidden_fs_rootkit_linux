@@ -10,5 +10,4 @@
 
 detect1和detect2这两个目录下的文件是用于隐藏文件系统检测的,首选使用detect1进行检测,如果detetc1没有奏效,那么再考虑用detect2进行检测
 
-使用detect1下的方法检测的方法就是进入detect1目录,然后运行sh do.sh
-使用detect2下的方法检测的方法就是进入detect2目录,然后运行sh detect.sh
+检测的方法就是进入相应的detect目录,然后运行sh do.sh即可
